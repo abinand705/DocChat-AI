@@ -1,0 +1,161 @@
+[
+  {
+    "id": "q01",
+    "type": "answerable",
+    "question": "What is the primary purpose of DocChat-AI?",
+    "expected_any": ["question answering", "document question answering", "RAG"],
+    "expected_page": 1
+  },
+  {
+    "id": "q02",
+    "type": "answerable",
+    "question": "What vector database does DocChat-AI use?",
+    "expected_any": ["ChromaDB", "Chroma"],
+    "expected_page": 1
+  },
+  {
+    "id": "q03",
+    "type": "answerable",
+    "question": "What API is used for embeddings and answer generation?",
+    "expected_any": ["Google Gemini", "Gemini API", "Gemini"],
+    "expected_page": 1
+  },
+  {
+    "id": "q04",
+    "type": "answerable",
+    "question": "What is the maximum recommended file size in megabytes?",
+    "expected_any": ["20 megabytes", "20 MB", "20MB", "20"],
+    "expected_page": 1
+  },
+  {
+    "id": "q05",
+    "type": "answerable",
+    "question": "What Python library is used to read PDF files page by page?",
+    "expected_any": ["pypdf", "pypdf library"],
+    "expected_page": 2
+  },
+  {
+    "id": "q06",
+    "type": "answerable",
+    "question": "How are text files treated in the ingestion pipeline?",
+    "expected_any": ["single page", "page numbered one", "page 1"],
+    "expected_page": 2
+  },
+  {
+    "id": "q07",
+    "type": "answerable",
+    "question": "What pattern does a unique chunk identifier follow in DocChat-AI?",
+    "expected_any": ["report_p3_c2", "p page number", "_p", "_c", "chunk identifier"],
+    "expected_page": 2
+  },
+  {
+    "id": "q08",
+    "type": "answerable",
+    "question": "What is the default chunk size in DocChat-AI?",
+    "expected_any": ["800 characters", "800"],
+    "expected_page": 3
+  },
+  {
+    "id": "q09",
+    "type": "answerable",
+    "question": "What is the character overlap between neighbouring chunks?",
+    "expected_any": ["100 characters", "100"],
+    "expected_page": 3
+  },
+  {
+    "id": "q10",
+    "type": "answerable",
+    "question": "Why does DocChat-AI use an overlap between chunks?",
+    "expected_any": ["boundary", "stay intact", "continuous context", "sentences"],
+    "expected_page": 3
+  },
+  {
+    "id": "q11",
+    "type": "answerable",
+    "question": "In how many items per batch are chunks embedded?",
+    "expected_any": ["50", "batches of 50"],
+    "expected_page": 4
+  },
+  {
+    "id": "q12",
+    "type": "answerable",
+    "question": "What similarity measure is used by the ChromaDB collection?",
+    "expected_any": ["cosine distance", "cosine similarity", "cosine"],
+    "expected_page": 4
+  },
+  {
+    "id": "q13",
+    "type": "answerable",
+    "question": "What task type is used when embedding document chunks?",
+    "expected_any": ["retrieval document", "retrieval_document", "RETRIEVAL_DOCUMENT"],
+    "expected_page": 4
+  },
+  {
+    "id": "q14",
+    "type": "answerable",
+    "question": "How many similar chunks are retrieved by default for top-k?",
+    "expected_any": ["4", "four"],
+    "expected_page": 5
+  },
+  {
+    "id": "q15",
+    "type": "answerable",
+    "question": "How are generated answers presented to the user on screen?",
+    "expected_any": ["streamed", "word by word", "streaming"],
+    "expected_page": 5
+  },
+  {
+    "id": "q16",
+    "type": "answerable",
+    "question": "Where is DocChat-AI deployed?",
+    "expected_any": ["Streamlit Community Cloud", "Streamlit"],
+    "expected_page": 6
+  },
+  {
+    "id": "q17",
+    "type": "answerable",
+    "question": "What is the name of the evaluation script mentioned in the document?",
+    "expected_any": ["run_eval.py"],
+    "expected_page": 6
+  },
+  {
+    "id": "q18",
+    "type": "unanswerable",
+    "question": "Who won the 2018 FIFA World Cup?"
+  },
+  {
+    "id": "q19",
+    "type": "unanswerable",
+    "question": "What is the capital of France?"
+  },
+  {
+    "id": "q20",
+    "type": "unanswerable",
+    "question": "How do commercial airplanes generate aerodynamic lift?"
+  },
+  {
+    "id": "q21",
+    "type": "unanswerable",
+    "question": "What is the recipe for baking chocolate chip cookies?"
+  },
+  {
+    "id": "q22",
+    "type": "unanswerable",
+    "question": "How does Pinecone vector database implement distributed sharding?"
+  },
+  {
+    "id": "q23",
+    "type": "unanswerable",
+    "question": "What is the boiling point of liquid nitrogen at sea level?"
+  },
+  {
+    "id": "q24",
+    "type": "unanswerable",
+    "question": "Who wrote the play Romeo and Juliet?"
+  },
+  {
+    "id": "q25",
+    "type": "unanswerable",
+    "question": "What is the speed of light in a vacuum in kilometers per second?"
+  }
+]

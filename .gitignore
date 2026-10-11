@@ -1,0 +1,39 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Environment variables & secrets
+.env
+.env.local
+.env.*.local
+
+# Vector store & local database storage
+chroma_db/
+*.sqlite3
+.embed_cache/
+
+# Evaluation artifacts and private data
+eval/*internship*
+eval/results*.json
+eval/REPORT*.md
+eval/chunk_experiment_*.md
+eval/chunk_experiment_*_partial.json
+data/private/
+
+# Agent symlinks and IDE configurations
+.agents/
+.claude/
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db

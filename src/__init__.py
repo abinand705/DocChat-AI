@@ -1,0 +1,1 @@
+"""DocChat-AI package initialization."""
