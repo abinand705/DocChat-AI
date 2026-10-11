@@ -1,2 +1,12 @@
 [server]
 maxUploadSize = 10
+
+[theme]
+base = "light"
+primaryColor = "#4f46e5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f8fafc"
+textColor = "#0f172a"
+font = "sans-serif"
+baseRadius = "8px"
+buttonRadius = "8px"
