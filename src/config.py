@@ -64,4 +64,9 @@ def get_daily_llm_calls_remaining() -> int:
     if _daily_call_date != today_utc:
         return MAX_LLM_CALLS_PER_DAY
     return max(0, MAX_LLM_CALLS_PER_DAY - _daily_call_count)
-
+# Demo / public-deployment limits
+MAX_UPLOAD_MB: int = 10
+MAX_PAGES: int = 60
+MAX_CHUNKS_PER_SESSION: int = 400
+MAX_QUESTIONS_PER_SESSION: int = 10
+MAX_LLM_CALLS_PER_DAY: int = 15
