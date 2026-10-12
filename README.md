@@ -6,10 +6,9 @@ DocChat-AI is an intelligent, retrieval-augmented document question-answering as
 
 ## 🔗 Demo
 
-- **Live Application:** <!-- TODO: Add live demo link here --> [Live Demo Link (Insert URL here)](#)
+- **Live Application:** [https://docchat-ai.streamlit.app/](https://docchat-ai.streamlit.app/)
 - **Preview:**
-  <!-- TODO: Add demo GIF or screenshot below -->
-  ![DocChat-AI Demo Preview](docs/demo_preview.gif)
+  ![DocChat-AI Demo Preview](demo.gif)
 
 ---
 

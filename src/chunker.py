@@ -135,12 +135,17 @@ def chunk_pages(
         text_pieces = split_text(text, chunk_size=chunk_size, overlap=overlap)
         for chunk_idx, piece in enumerate(text_pieces, start=1):
             chunk_id = f"{base_name}_p{page_num}_c{chunk_idx}"
-            chunked_results.append({
+            chunk_dict: dict[str, Any] = {
                 "text": piece,
                 "file": file_name,
                 "page": page_num,
                 "chunk_id": chunk_id,
-            })
+            }
+            if "total_pages" in page_data:
+                chunk_dict["total_pages"] = page_data["total_pages"]
+            if "unreadable_pages" in page_data:
+                chunk_dict["unreadable_pages"] = page_data["unreadable_pages"]
+            chunked_results.append(chunk_dict)
 
     return chunked_results
 

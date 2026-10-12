@@ -26,16 +26,31 @@ else:
 
 # Import configuration constants with fallbacks
 try:
-    from src.config import COLLECTION_NAME, FALLBACK_MODEL, GEMINI_MODEL, MIN_SCORE, TOP_K
+    from src.config import (
+        COLLECTION_NAME,
+        FALLBACK_MODEL,
+        GEMINI_MODEL,
+        MAX_HISTORY_TURNS,
+        MIN_SCORE,
+        TOP_K,
+    )
 except ImportError:
     try:
-        from config import COLLECTION_NAME, FALLBACK_MODEL, GEMINI_MODEL, MIN_SCORE, TOP_K
+        from config import (
+            COLLECTION_NAME,
+            FALLBACK_MODEL,
+            GEMINI_MODEL,
+            MAX_HISTORY_TURNS,
+            MIN_SCORE,
+            TOP_K,
+        )
     except ImportError:
         COLLECTION_NAME = "docchat"
         TOP_K = 6
         MIN_SCORE = 0.5
         GEMINI_MODEL = "gemini-2.5-flash"
         FALLBACK_MODEL = "gemini-2.5-flash-lite"
+        MAX_HISTORY_TURNS = 6
 
 # Import prompts
 try:
@@ -48,12 +63,24 @@ except ImportError:
 
 # Import vector store search and file listing
 try:
-    from src.vector_store import list_files, search
+    from src.vector_store import get_file_chunks, list_files, search
 except ImportError:
     try:
-        from vector_store import list_files, search
+        from vector_store import get_file_chunks, list_files, search
     except ImportError as err:
         raise ImportError(f"Could not import vector_store functions: {err}") from err
+
+# Import loader get_unreadable_pages
+try:
+    from src.loader import get_unreadable_pages
+except ImportError:
+    try:
+        from loader import get_unreadable_pages
+    except ImportError:
+        def get_unreadable_pages(filename: Any) -> list[int]:
+            return []
+
+IMAGE_UNREADABLE_NOTE: str = "Note: some pages of this file contain only images, which DocChat-AI cannot read."
 
 # Import embeddings get_client
 try:
@@ -179,8 +206,8 @@ def is_not_found_response(answer: str) -> bool:
     """Check if an answer represents a 'not found' refusal.
 
     Normalizes curly quotes/apostrophes before comparing with NOT_FOUND_MESSAGE.
-    Treats the answer as 'not found' only if the response is mostly that sentence
-    (the sentence is the whole answer or at least 80% of it).
+    Treats the answer as 'not found' if it matches or starts with NOT_FOUND_MESSAGE,
+    or contains it alongside the image-pages note or at least 80% ratio.
     """
     if not answer or not answer.strip():
         return True
@@ -191,10 +218,12 @@ def is_not_found_response(answer: str) -> bool:
     target = NOT_FOUND_MESSAGE.strip().lower()
     target = target.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
 
-    if norm == target:
+    if norm == target or norm.startswith(target):
         return True
 
     if target in norm:
+        if IMAGE_UNREADABLE_NOTE.lower() in norm:
+            return True
         # Check if NOT_FOUND_MESSAGE is at least 80% of the full response text
         ratio = len(target) / len(norm)
         if ratio >= 0.8:
@@ -203,7 +232,84 @@ def is_not_found_response(answer: str) -> bool:
     return False
 
 
+def _has_unreadable_pages_for_target(file: Optional[str], collection_name: str = COLLECTION_NAME) -> bool:
+    """Check if the selected file or sole indexed file has recorded unreadable pages."""
+    target_file = file
+    if not target_file:
+        try:
+            indexed = list_files(collection_name=collection_name)
+            if len(indexed) == 1:
+                target_file = indexed[0]
+        except Exception:
+            pass
+    if target_file:
+        try:
+            pages = get_unreadable_pages(target_file)
+            return bool(pages)
+        except Exception:
+            pass
+    return False
+
+
 CITATION_PATTERN: re.Pattern = re.compile(r"\[(?:Chunk\s*)?(\d+)\]")
+REWRITTEN_CITATION_REGEX: re.Pattern = re.compile(r"\[([^,\]]+),\s*p\.(\d+)\]")
+
+
+def clean_sentence_citations(sentence: str, seen_in_sentence: set[tuple[str, int]]) -> str:
+    """Clean citations in a single sentence: sort clusters by page, remove duplicates."""
+    cluster_pattern = re.compile(r"(\s*)(\[[^,\]]+,\s*p\.\d+\](?:\s*\[[^,\]]+,\s*p\.\d+\])*)")
+
+    def _replace_cluster_match(m: re.Match) -> str:
+        leading_space = m.group(1)
+        cluster_str = m.group(2)
+        cites = REWRITTEN_CITATION_REGEX.findall(cluster_str)
+        kept_cites: list[tuple[str, int]] = []
+        cluster_seen: set[tuple[str, int]] = set()
+
+        for f, p in cites:
+            key = (f.strip(), int(p))
+            if key not in seen_in_sentence and key not in cluster_seen:
+                cluster_seen.add(key)
+                kept_cites.append((f.strip(), int(p)))
+                seen_in_sentence.add(key)
+
+        if not kept_cites:
+            return ""
+
+        # Sort multiple citations by page
+        kept_cites.sort(key=lambda item: (item[1], item[0]))
+
+        sep = " " if "] [" in cluster_str else ""
+        formatted = sep.join(f"[{f}, p.{p}]" for f, p in kept_cites)
+        return leading_space + formatted
+
+    cleaned = cluster_pattern.sub(_replace_cluster_match, sentence)
+    cleaned = re.sub(r" +([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"  +", " ", cleaned)
+    return cleaned
+
+
+def clean_citations(text: str) -> str:
+    """Remove duplicate citations back to back or within the same sentence, and sort multiple citations by page.
+
+    Args:
+        text: Text containing rewritten citations e.g. [sample.pdf, p.2].
+
+    Returns:
+        Cleaned text with duplicates removed and citations sorted by page.
+    """
+    if not text:
+        return text
+
+    parts = re.split(r"([.?!]+(?:\s+|\n+|$)|(?:\n\s*\n+))", text)
+    result: list[str] = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:  # Sentence content
+            seen_in_sentence: set[tuple[str, int]] = set()
+            result.append(clean_sentence_citations(part, seen_in_sentence))
+        else:
+            result.append(part)
+    return "".join(result)
 
 
 def parse_and_rewrite_citations(
@@ -213,7 +319,8 @@ def parse_and_rewrite_citations(
     r"""Parse citations with r"\[(?:Chunk\s*)?(\d+)\]", map to (file, page), rewrite and filter sources.
 
     Maps each cited number to (file, page) from retrieved chunks, rewrites them in the
-    final answer as [file, p.X], and builds "sources" only from the cited chunks.
+    final answer as [file, p.X], deduplicates citations, sorts multiple citations by page,
+    and builds "sources" only from the cited chunks.
     If there are no valid citations, returns all retrieved chunks and marks uncited=True.
 
     Args:
@@ -248,12 +355,14 @@ def parse_and_rewrite_citations(
         return match.group(0)
 
     rewritten_answer = CITATION_PATTERN.sub(_replace_citation, raw_answer)
+    rewritten_answer = clean_citations(rewritten_answer)
 
     if cited_indices:
         sources = [
             {
                 "file": relevant_chunks[idx].get("file", ""),
                 "page": relevant_chunks[idx].get("page", 1),
+                "total_pages": relevant_chunks[idx].get("total_pages", 1),
                 "text": relevant_chunks[idx].get("text", ""),
                 "score": relevant_chunks[idx].get("score", 0.0),
             }
@@ -266,6 +375,7 @@ def parse_and_rewrite_citations(
             {
                 "file": c.get("file", ""),
                 "page": c.get("page", 1),
+                "total_pages": c.get("total_pages", 1),
                 "text": c.get("text", ""),
                 "score": c.get("score", 0.0),
             }
@@ -285,11 +395,15 @@ class AnswerStream:
         sources: list[dict[str, Any]],
         model: Optional[str] = None,
         uncited: bool = False,
+        called_llm: bool = True,
+        is_cached: bool = False,
     ) -> None:
         self._gen = generator
         self.sources = sources
         self.model = model
         self.uncited = uncited
+        self.called_llm = called_llm
+        self.is_cached = is_cached
 
     def __iter__(self) -> "AnswerStream":
         return self
@@ -353,6 +467,8 @@ def answer_question(
             "sources": [],
             "model": "none",
             "uncited": False,
+            "called_llm": False,
+            "is_cached": False,
         }
 
     # Step 1: Check in-memory answer cache (only when history is empty and not bypassed)
@@ -360,7 +476,10 @@ def answer_question(
     cache_key = get_cache_key(question, collection_name=collection_name)
     if not has_history and not bypass_cache and cache_key in _answer_cache:
         logger.info("Serving answer from in-memory cache for: '%s'", question)
-        return _answer_cache[cache_key]
+        cached_res = dict(_answer_cache[cache_key])
+        cached_res["called_llm"] = False
+        cached_res["is_cached"] = True
+        return cached_res
 
     # Step 2: Retrieve chunks from vector store
     retrieved_chunks = search(query=question.strip(), k=k, collection_name=collection_name, file=file)
@@ -368,11 +487,16 @@ def answer_question(
     # Step 3: Filter chunks below min_score
     relevant_chunks = [c for c in retrieved_chunks if c.get("score", 0.0) >= min_score]
     if not relevant_chunks:
+        ans = NOT_FOUND_MESSAGE
+        if _has_unreadable_pages_for_target(file, collection_name=collection_name):
+            ans = f"{NOT_FOUND_MESSAGE}\n\n{IMAGE_UNREADABLE_NOTE}"
         result = {
-            "answer": NOT_FOUND_MESSAGE,
+            "answer": ans,
             "sources": [],
             "model": "none (threshold)",
             "uncited": False,
+            "called_llm": False,
+            "is_cached": False,
         }
         if not has_history:
             _answer_cache[cache_key] = result
@@ -393,6 +517,7 @@ def answer_question(
         question=question.strip(),
         chunks=relevant_chunks,
         history=history,
+        max_history_turns=MAX_HISTORY_TURNS,
     )
 
     client = get_client()
@@ -487,11 +612,16 @@ def answer_question(
     raw_answer = response.text.strip() if (response and response.text) else NOT_FOUND_MESSAGE
 
     if is_not_found_response(raw_answer):
+        ans = NOT_FOUND_MESSAGE
+        if _has_unreadable_pages_for_target(file, collection_name=collection_name):
+            ans = f"{NOT_FOUND_MESSAGE}\n\n{IMAGE_UNREADABLE_NOTE}"
         result = {
-            "answer": NOT_FOUND_MESSAGE,
+            "answer": ans,
             "sources": [],
             "model": used_model,
             "uncited": False,
+            "called_llm": True,
+            "is_cached": False,
         }
     else:
         rewritten_answer, final_sources, uncited = parse_and_rewrite_citations(
@@ -502,12 +632,189 @@ def answer_question(
             "sources": final_sources,
             "model": used_model,
             "uncited": uncited,
+            "called_llm": True,
+            "is_cached": False,
         }
 
     # Cache answer in memory only if history is empty
     if not has_history:
         _answer_cache[cache_key] = result
     return result
+
+
+def summarize_document(
+    file: str,
+    collection_name: str = COLLECTION_NAME,
+    model: str = GEMINI_MODEL,
+    fallback_model: str = FALLBACK_MODEL,
+) -> dict[str, Any]:
+    """Generate a concise summary of an indexed document using evenly spaced chunks.
+
+    Takes up to 12 chunks spread evenly across the document (sorted by page, picked at
+    even intervals), builds a prompt asking for a concise summary using the numbered-citation
+    rules, and makes one LLM call.
+
+    Args:
+        file: Target filename to summarize.
+        collection_name: Vector store collection name. Defaults to COLLECTION_NAME.
+        model: Primary Gemini model. Defaults to GEMINI_MODEL.
+        fallback_model: Fallback Gemini model. Defaults to FALLBACK_MODEL.
+
+    Returns:
+        Dict with 'answer' (str), 'sources' (list of dicts), 'model' (str), and 'uncited' (bool).
+
+    Raises:
+        QuotaExceededError: If daily/rate quota is exceeded across primary and fallback models.
+        RuntimeError: If LLM call fails due to non-quota errors.
+    """
+    if not file or not file.strip():
+        return {
+            "answer": "No file specified for summary.",
+            "sources": [],
+            "model": "none",
+            "uncited": False,
+            "called_llm": False,
+            "is_cached": False,
+        }
+
+    # Retrieve all chunks belonging to this file
+    file_chunks = get_file_chunks(filename=file.strip(), collection_name=collection_name)
+    if not file_chunks:
+        return {
+            "answer": f"No content found for document '{file}'.",
+            "sources": [],
+            "model": "none",
+            "uncited": False,
+            "called_llm": False,
+            "is_cached": False,
+        }
+
+    # Sort chunks by page number
+    file_chunks.sort(key=lambda c: int(c.get("page", 1)))
+
+    # Pick up to 12 chunks spread evenly across the document at even intervals
+    if len(file_chunks) <= 12:
+        selected_chunks = file_chunks
+    else:
+        n = len(file_chunks)
+        indices = [int(round(i * (n - 1) / 11.0)) for i in range(12)]
+        seen_indices = set()
+        selected_chunks = []
+        for idx in indices:
+            if idx not in seen_indices:
+                seen_indices.add(idx)
+                selected_chunks.append(file_chunks[idx])
+
+    summary_question = (
+        f"Provide a concise summary of the document '{file}'. "
+        "Synthesize the key points, main conclusions, and essential details across the excerpts. "
+        "Follow the citation rules strictly by citing sources for every factual assertion using only bracketed numbers like [1] or [2]."
+    )
+
+    user_prompt = build_prompt(
+        question=summary_question,
+        chunks=selected_chunks,
+        history=None,
+    )
+
+    client = get_client()
+    config = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT)
+
+    response = None
+    used_model = None
+
+    if is_primary_daily_quota_exhausted():
+        logger.info(
+            "Primary model %s daily quota already exhausted; routing summary directly to fallback %s...",
+            model,
+            fallback_model,
+        )
+        try:
+            response = client.models.generate_content(
+                model=fallback_model,
+                contents=user_prompt,
+                config=config,
+            )
+            used_model = fallback_model
+        except Exception as fb_exc:
+            is_quota_fb, _ = _is_quota_error(fb_exc)
+            if is_quota_fb:
+                raise QuotaExceededError(
+                    "The AI model's free daily limit has been reached. Please try again later."
+                ) from fb_exc
+            raise RuntimeError(f"Fallback model failed for summary: {fb_exc}") from fb_exc
+    else:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=user_prompt,
+                config=config,
+            )
+            used_model = model
+        except Exception as prim_exc:
+            is_quota, is_daily = _is_quota_error(prim_exc)
+            if is_daily:
+                set_primary_daily_quota_exhausted()
+            elif is_quota:
+                delay = _parse_retry_delay_seconds(str(prim_exc))
+                wait_time = min(max(delay, 5.0) if delay > 0 else 65.0, 65.0)
+                time.sleep(wait_time)
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=user_prompt,
+                        config=config,
+                    )
+                    used_model = model
+                except Exception as retry_exc:
+                    is_retry_quota, is_retry_daily = _is_quota_error(retry_exc)
+                    if is_retry_daily:
+                        set_primary_daily_quota_exhausted()
+                    prim_exc = retry_exc
+                    is_quota = is_retry_quota
+
+            if response is None:
+                try:
+                    response = client.models.generate_content(
+                        model=fallback_model,
+                        contents=user_prompt,
+                        config=config,
+                    )
+                    used_model = fallback_model
+                except Exception as fb_exc:
+                    is_quota_fb, _ = _is_quota_error(fb_exc)
+                    if is_quota or is_quota_fb:
+                        raise QuotaExceededError(
+                            "The AI model's free daily limit has been reached. Please try again later."
+                        ) from fb_exc
+                    raise RuntimeError(f"Failed to generate summary: {fb_exc}") from fb_exc
+
+    raw_answer = response.text.strip() if (response and response.text) else NOT_FOUND_MESSAGE
+
+    if is_not_found_response(raw_answer):
+        ans = NOT_FOUND_MESSAGE
+        if _has_unreadable_pages_for_target(file, collection_name=collection_name):
+            ans = f"{NOT_FOUND_MESSAGE}\n\n{IMAGE_UNREADABLE_NOTE}"
+        return {
+            "answer": ans,
+            "sources": [],
+            "model": used_model,
+            "uncited": False,
+            "called_llm": True,
+            "is_cached": False,
+        }
+
+    rewritten_answer, final_sources, uncited = parse_and_rewrite_citations(
+        raw_answer, selected_chunks
+    )
+    return {
+        "answer": rewritten_answer,
+        "sources": final_sources,
+        "model": used_model,
+        "uncited": uncited,
+        "called_llm": True,
+        "is_cached": False,
+    }
 
 
 def stream_answer(
@@ -540,7 +847,7 @@ def stream_answer(
             yield NOT_FOUND_MESSAGE
             return [], False
 
-        return AnswerStream(_empty_stream(), sources=[], model="none", uncited=False)
+        return AnswerStream(_empty_stream(), sources=[], model="none", uncited=False, called_llm=False, is_cached=False)
 
     # Check in-memory cache first (only when history is empty)
     has_history = bool(history and len(history) > 0)
@@ -563,6 +870,8 @@ def stream_answer(
             sources=cached_sources,
             model=cached_model,
             uncited=cached_uncited,
+            called_llm=False,
+            is_cached=True,
         )
 
     # Retrieve chunks from vector store
@@ -571,24 +880,31 @@ def stream_answer(
     # Drop chunks below min_score
     relevant_chunks = [c for c in retrieved_chunks if c.get("score", 0.0) >= min_score]
     if not relevant_chunks:
+        not_found_ans = NOT_FOUND_MESSAGE
+        if _has_unreadable_pages_for_target(file, collection_name=collection_name):
+            not_found_ans = f"{NOT_FOUND_MESSAGE}\n\n{IMAGE_UNREADABLE_NOTE}"
+
         def _not_found_stream() -> Generator[str, None, tuple[list[dict[str, Any]], bool]]:
-            yield NOT_FOUND_MESSAGE
+            yield not_found_ans
             return [], False
 
         result = {
-            "answer": NOT_FOUND_MESSAGE,
+            "answer": not_found_ans,
             "sources": [],
             "model": "none (threshold)",
             "uncited": False,
+            "called_llm": False,
+            "is_cached": False,
         }
         if not has_history:
             _answer_cache[cache_key] = result
-        return AnswerStream(_not_found_stream(), sources=[], model="none (threshold)", uncited=False)
+        return AnswerStream(_not_found_stream(), sources=[], model="none (threshold)", uncited=False, called_llm=False, is_cached=False)
 
     user_prompt = build_prompt(
         question=question.strip(),
         chunks=relevant_chunks,
         history=history,
+        max_history_turns=MAX_HISTORY_TURNS,
     )
 
     stream_holder: dict[str, Optional[str]] = {"model": None}
@@ -758,6 +1074,9 @@ def stream_answer(
             final_sources = []
             uncited = False
             rewritten_answer = NOT_FOUND_MESSAGE
+            if _has_unreadable_pages_for_target(file, collection_name=collection_name):
+                rewritten_answer = f"{NOT_FOUND_MESSAGE}\n\n{IMAGE_UNREADABLE_NOTE}"
+                yield f"\n\n{IMAGE_UNREADABLE_NOTE}"
         else:
             rewritten_answer, final_sources, uncited = parse_and_rewrite_citations(
                 full_raw_text.strip(), relevant_chunks
@@ -773,8 +1092,7 @@ def stream_answer(
             }
         return final_sources, uncited
 
-    ans_stream = AnswerStream(_generator(), sources=relevant_chunks)
-    return ans_stream
+    ans_stream = AnswerStream(_generator(), sources=relevant_chunks, called_llm=True, is_cached=False)
     return ans_stream
 
 

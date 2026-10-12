@@ -102,18 +102,78 @@ def remove_headers_footers(
     return cleaned_pages
 
 
-def load_document(file: Union[str, Path, BinaryIO, Any]) -> list[dict[str, Any]]:
+_unreadable_pages_by_file: dict[str, list[int]] = {}
+
+
+def get_unreadable_pages(filename: Union[str, Path, Any]) -> list[int]:
+    """Return recorded unreadable pages for a given filename."""
+    fname = _extract_filename(filename)
+    return list(_unreadable_pages_by_file.get(fname, []))
+
+
+def set_unreadable_pages(filename: Union[str, Path, Any], pages: list[int]) -> None:
+    """Record unreadable pages for a given filename."""
+    fname = _extract_filename(filename)
+    _unreadable_pages_by_file[fname] = sorted(set(pages))
+
+
+def format_unreadable_pages(pages: list[int]) -> str:
+    """Format a list of page numbers into a persistent note string.
+
+    Example:
+        format_unreadable_pages([4, 21, 22, 23, 24, 25])
+        -> 'Pages 4, 21-25 have no readable text (images are not read).'
+    """
+    if not pages:
+        return ""
+    sorted_pages = sorted(set(pages))
+    ranges: list[str] = []
+    start = sorted_pages[0]
+    prev = sorted_pages[0]
+
+    for p in sorted_pages[1:]:
+        if p == prev + 1:
+            prev = p
+        else:
+            if start == prev:
+                ranges.append(str(start))
+            else:
+                ranges.append(f"{start}-{prev}")
+            start = p
+            prev = p
+
+    if start == prev:
+        ranges.append(str(start))
+    else:
+        ranges.append(f"{start}-{prev}")
+
+    range_str = ", ".join(ranges)
+    prefix = "Page" if (len(sorted_pages) == 1 and "-" not in ranges[0]) else "Pages"
+    verb = "has" if prefix == "Page" else "have"
+    return f"{prefix} {range_str} {verb} no readable text (images are not read)."
+
+
+def load_document(
+    file: Union[str, Path, BinaryIO, Any],
+    return_unreadable: bool = False,
+) -> Union[list[dict[str, Any]], tuple[list[dict[str, Any]], list[int]]]:
     """Load and extract text from a PDF or TXT document.
+
+    Records pages whose extracted text is empty or under 20 characters.
+    Stores 'total_pages' in each extracted page dictionary.
 
     Args:
         file: A file path (str or Path) or an uploaded file object
             (such as a Streamlit UploadedFile or file-like object).
+        return_unreadable: If True, returns a tuple of (pages_data, unreadable_pages).
 
     Returns:
         A list of dictionaries with keys:
             - 'text' (str): Extracted and cleaned text content.
             - 'file' (str): Name of the file.
             - 'page' (int): Page number (1-indexed for PDF, 1 for TXT).
+            - 'total_pages' (int): Total page count of the document.
+        Or a tuple (pages_data, unreadable_pages) if return_unreadable=True.
 
     Raises:
         FileNotFoundError: If the provided file path does not exist.
@@ -148,18 +208,28 @@ def load_document(file: Union[str, Path, BinaryIO, Any]) -> list[dict[str, Any]]
                         f"PDF file '{filename}' is encrypted and could not be decrypted."
                     )
 
+            total_pages = len(reader.pages)
             pages_data: list[dict[str, Any]] = []
+            unreadable_pages: list[int] = []
+
             for page_idx, page in enumerate(reader.pages, start=1):
                 extracted = page.extract_text()
-                if extracted:
-                    cleaned = extracted.strip()
-                    if cleaned:
-                        pages_data.append({
-                            "text": cleaned,
-                            "file": filename,
-                            "page": page_idx,
-                        })
+                cleaned = extracted.strip() if extracted else ""
+                if len(cleaned) < 20:
+                    unreadable_pages.append(page_idx)
+                if cleaned:
+                    pages_data.append({
+                        "text": cleaned,
+                        "file": filename,
+                        "page": page_idx,
+                        "total_pages": total_pages,
+                        "unreadable_pages": unreadable_pages,
+                    })
+
+            set_unreadable_pages(filename, unreadable_pages)
             pages_data = remove_headers_footers(pages_data)
+            if return_unreadable:
+                return pages_data, unreadable_pages
             return pages_data
         except ValueError:
             raise
@@ -193,14 +263,25 @@ def load_document(file: Union[str, Path, BinaryIO, Any]) -> list[dict[str, Any]]
                 ) from dec_err
 
         cleaned = text.strip()
+        total_pages = 1
+        unreadable_pages = [1] if len(cleaned) < 20 else []
+        set_unreadable_pages(filename, unreadable_pages)
+
         if not cleaned:
+            if return_unreadable:
+                return [], unreadable_pages
             return []
+
         pages_data = [{
             "text": cleaned,
             "file": filename,
             "page": 1,
+            "total_pages": total_pages,
+            "unreadable_pages": unreadable_pages,
         }]
         pages_data = remove_headers_footers(pages_data)
+        if return_unreadable:
+            return pages_data, unreadable_pages
         return pages_data
     except ValueError:
         raise

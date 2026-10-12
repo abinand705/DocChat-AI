@@ -6,11 +6,13 @@ in-memory caching, and cited source filtering.
 """
 
 from collections import defaultdict
+import datetime
 import html
+import hmac
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -31,25 +33,42 @@ st.set_page_config(
 
 # 2. Environment & Secrets Management
 load_dotenv()
-try:
-    if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
-        secret_key = str(st.secrets["GEMINI_API_KEY"]).strip()
-        if secret_key:
-            os.environ["GEMINI_API_KEY"] = secret_key
-except Exception as secret_exc:
-    logger.exception("Error loading GEMINI_API_KEY from st.secrets: %s", secret_exc)
+import importlib
+import src.config
+if not hasattr(src.config, "DEMO_MODE"):
+    importlib.reload(src.config)
+from src.config import (
+    DEMO_MODE,
+    MAX_CHUNKS_PER_SESSION,
+    MAX_HISTORY_TURNS,
+    MAX_LLM_CALLS_PER_DAY,
+    MAX_PAGES,
+    MAX_QUESTIONS_PER_SESSION,
+    MAX_SESSIONS_PER_DAY,
+    MAX_UPLOAD_MB,
+    OWNER_KEY,
+    get_secret,
+)
+
+gemini_key = get_secret("GEMINI_API_KEY")
+if gemini_key:
+    os.environ["GEMINI_API_KEY"] = gemini_key
 
 # Import core modules and configs
 from src.chunker import chunk_pages
-from src.config import (
-    MAX_CHUNKS_PER_SESSION,
-    MAX_PAGES,
-    MAX_QUESTIONS_PER_SESSION,
-    MAX_UPLOAD_MB,
+from src.limits import (
     check_and_increment_daily_llm_calls,
+    check_and_register_session,
+    get_daily_llm_calls_remaining,
+    is_session_registered,
 )
-from src.loader import load_document
-from src.rag import QuotaExceededError, clear_answer_cache, stream_answer
+from src.loader import format_unreadable_pages, get_unreadable_pages, load_document
+from src.rag import (
+    QuotaExceededError,
+    clear_answer_cache,
+    stream_answer,
+    summarize_document,
+)
 from src.vector_store import (
     add_chunks,
     cleanup_old_collections,
@@ -57,6 +76,19 @@ from src.vector_store import (
     get_collection,
     list_files,
 )
+
+
+def ensure_session_allowed(is_owner: bool = False) -> bool:
+    """Check and register session on first user action.
+
+    Returns True if allowed. If the visitor limit is reached on first action,
+    displays the visitor-limit message and returns False without performing the action.
+    """
+    if not check_and_register_session(st.session_state.session_id, is_owner=is_owner):
+        st.info("The demo reached today's visitor limit, please come back tomorrow")
+        st.markdown("[DocChat-AI on GitHub](https://github.com/abinand705/DocChat-AI#readme)")
+        return False
+    return True
 
 # Custom CSS: Minimalist Modern Workspace (Linear / Perplexity inspired)
 st.markdown(
@@ -116,39 +148,7 @@ st.markdown(
         --shadow-focus: 0 0 0 3px var(--accent-ring);
     }
 
-    /* Dark Mode Tokens */
-    @media (prefers-color-scheme: dark) {
-        :root {
-            --bg-canvas: #090d16;
-            --bg-surface: #111827;
-            --bg-panel: #0d121f;
-            --bg-muted: #1e293b;
-            --bg-elevated: #1a2234;
 
-            --border-subtle: rgba(255, 255, 255, 0.05);
-            --border-default: rgba(255, 255, 255, 0.08);
-            --border-strong: rgba(255, 255, 255, 0.18);
-
-            --text-primary: #f8fafc;
-            --text-secondary: #cbd5e1;
-            --text-muted: #94a3b8;
-            --text-inverse: #0f172a;
-
-            /* Chat Bubble Tokens (Dark Mode) */
-            --bg-chat-user: #1e1b4b;       /* Deep slate-indigo */
-            --text-chat-user: #f8fafc;
-            --border-chat-user: #3730a3;
-
-            --accent-primary: #6366f1;
-            --accent-hover: #818cf8;
-            --accent-subtle: rgba(99, 102, 241, 0.14);
-            --accent-ring: rgba(99, 102, 241, 0.35);
-
-            --shadow-subtle: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-            --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.4);
-            --shadow-floating: 0 4px 20px -2px rgba(0, 0, 0, 0.5);
-        }
-    }
 
     /* Base typography: explicitly exclude icon containers */
     html, body, input, textarea, button, select {
@@ -603,18 +603,10 @@ st.markdown(
 
     [data-testid="stChatInput"] {
         border-radius: 28px !important;
-        border: 1px solid var(--border-default) !important;
-        background: rgba(255, 255, 255, 0.88) !important;
-        backdrop-filter: blur(16px) !important;
-        -webkit-backdrop-filter: blur(16px) !important;
+        border: 1.5px solid var(--border-default) !important;
+        background: #ffffff !important;
         box-shadow: var(--shadow-floating) !important;
         transition: all 0.2s ease !important;
-    }
-
-    @media (prefers-color-scheme: dark) {
-        [data-testid="stChatInput"] {
-            background: rgba(17, 24, 39, 0.88) !important;
-        }
     }
 
     [data-testid="stChatInput"]:focus-within {
@@ -622,10 +614,23 @@ st.markdown(
         box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow-floating) !important;
     }
 
+    [data-testid="stChatInput"] div[data-baseweb="base-input"],
+    [data-testid="stChatInput"] div[data-baseweb="textarea"] {
+        background-color: transparent !important;
+    }
+
     [data-testid="stChatInput"] textarea {
         font-family: var(--font-sans) !important;
-        font-size: 0.86rem !important;
-        color: var(--text-primary) !important;
+        font-size: 0.90rem !important;
+        color: #0f172a !important;
+        caret-color: var(--accent-primary) !important;
+        background-color: transparent !important;
+        line-height: 1.5 !important;
+    }
+
+    [data-testid="stChatInput"] textarea::placeholder {
+        color: #64748b !important;
+        opacity: 1 !important;
     }
 
     /* 4.5 Collapsible Sources & Citations */
@@ -805,6 +810,9 @@ def initialize_session_state() -> str:
     if "question_count" not in st.session_state:
         st.session_state.question_count = 0
 
+    if "unreadable_pages" not in st.session_state:
+        st.session_state.unreadable_pages = {}
+
     return session_collection
 
 
@@ -860,7 +868,7 @@ def render_sources(sources: list[dict[str, Any]], uncited: bool = False) -> None
                 )
 
 
-def render_sidebar(session_collection: str) -> None:
+def render_sidebar(session_collection: str, is_owner: bool = False) -> None:
     """Render sidebar controls including uploads, limits, demo loader, and file management."""
     with st.sidebar:
         # Minimalist Brand Header
@@ -875,6 +883,17 @@ def render_sidebar(session_collection: str) -> None:
             unsafe_allow_html=True,
         )
 
+        # Privacy Notice (Requirement 6)
+        st.caption("Uploaded text is sent to Google's Gemini API. Don't upload confidential documents.")
+
+        # Show questions left caption in DEMO_MODE (Requirement 2)
+        if DEMO_MODE:
+            if is_owner:
+                st.caption("Questions left: Unlimited (Owner)")
+            else:
+                questions_left = max(0, MAX_QUESTIONS_PER_SESSION - st.session_state.question_count)
+                st.caption(f"Questions left: {questions_left}")
+
         # Check API key status
         if not os.getenv("GEMINI_API_KEY"):
             st.error("API Key missing: set GEMINI_API_KEY in .env or secrets.")
@@ -882,8 +901,10 @@ def render_sidebar(session_collection: str) -> None:
         # Quick Starts
         st.markdown('<div class="sidebar-section-header">Quick Start</div>', unsafe_allow_html=True)
         demo_path = Path("data/sample.pdf").resolve()
-        if st.button("Load Sample Document", use_container_width=True, help="Load data/sample.pdf into this session"):
-            if not demo_path.exists():
+        if st.button("Load Sample Document", width="stretch", help="Load data/sample.pdf into this session"):
+            if not ensure_session_allowed(is_owner=is_owner):
+                pass
+            elif not demo_path.exists():
                 st.error("Demo document 'data/sample.pdf' was not found.")
             else:
                 with st.spinner("Indexing sample document..."):
@@ -900,6 +921,8 @@ def render_sidebar(session_collection: str) -> None:
                             delete_file(demo_path.name, collection_name=session_collection)
                             add_chunks(chunks, collection_name=session_collection)
                             clear_answer_cache(collection_name=session_collection)
+                            unreadable = get_unreadable_pages(demo_path.name)
+                            st.session_state.unreadable_pages[demo_path.name] = unreadable
                             st.session_state.flash_message = (
                                 f"Loaded sample document ({demo_path.name}) with {len(chunks)} chunks!"
                             )
@@ -911,6 +934,7 @@ def render_sidebar(session_collection: str) -> None:
         # Example question prompt starters
         indexed_files = list_files(collection_name=session_collection)
         has_documents = bool(indexed_files)
+        is_at_q_limit = DEMO_MODE and not is_owner and (st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION)
 
         example_questions = [
             "What is the primary purpose of DocChat-AI?",
@@ -918,9 +942,12 @@ def render_sidebar(session_collection: str) -> None:
             "What API is used for embeddings and answer generation?",
         ]
         for idx, ex_q in enumerate(example_questions, start=1):
-            if st.button(f"→  {ex_q}", key=f"ex_btn_{idx}", use_container_width=True, disabled=not has_documents):
-                st.session_state.pending_question = ex_q
-                st.rerun()
+            if st.button(f"→  {ex_q}", key=f"ex_btn_{idx}", width="stretch", disabled=not has_documents or is_at_q_limit):
+                if not ensure_session_allowed(is_owner=is_owner):
+                    pass
+                else:
+                    st.session_state.pending_question = ex_q
+                    st.rerun()
 
         # Document Upload Area
         st.markdown('<div class="sidebar-section-header">Upload Documents</div>', unsafe_allow_html=True)
@@ -932,95 +959,112 @@ def render_sidebar(session_collection: str) -> None:
             label_visibility="collapsed",
         )
 
-        if st.button("Process Documents", type="primary", use_container_width=True, disabled=not uploaded_files):
-            with st.spinner("Parsing, chunking, and indexing documents..."):
-                try:
-                    total_chunks_added = 0
-                    processed_files_count = 0
+        if st.button("Process Documents", type="primary", width="stretch", disabled=not uploaded_files):
+            if not ensure_session_allowed(is_owner=is_owner):
+                pass
+            else:
+                with st.spinner("Parsing, chunking, and indexing documents..."):
+                    try:
+                        total_chunks_added = 0
+                        processed_files_count = 0
 
-                    for file in uploaded_files:
-                        filename = file.name
+                        for file in uploaded_files:
+                            filename = file.name
 
-                        # 1. Check file size limit
-                        file_size_mb = getattr(file, "size", 0) / (1024 * 1024)
-                        if file_size_mb > MAX_UPLOAD_MB:
-                            st.warning(
-                                f"File '{filename}' ({file_size_mb:.1f} MB) exceeds the maximum "
-                                f"allowed size of {MAX_UPLOAD_MB} MB."
-                            )
-                            continue
-
-                        # 2. Check PDF page limit and scan for empty text layers
-                        num_pdf_pages = None
-                        if filename.lower().endswith(".pdf"):
-                            try:
-                                if hasattr(file, "seek"):
-                                    file.seek(0)
-                                reader = PdfReader(file)
-                                num_pdf_pages = len(reader.pages)
-                                if hasattr(file, "seek"):
-                                    file.seek(0)
-                                if num_pdf_pages > MAX_PAGES:
-                                    st.warning(
-                                        f"File '{filename}' exceeds the limit of {MAX_PAGES} pages "
-                                        f"({num_pdf_pages} pages)."
-                                    )
-                                    continue
-                            except Exception as pdf_err:
-                                logger.exception("Failed reading PDF metadata for %s: %s", filename, pdf_err)
-
-                        # 3. Load pages
-                        pages = load_document(file)
-                        if not pages:
-                            st.warning(f"No extractable text found in '{filename}'.")
-                            continue
-
-                        # 4. Warn if pages have no text layer
-                        if num_pdf_pages is not None:
-                            extracted_count = len(pages)
-                            empty_pages = num_pdf_pages - extracted_count
-                            if empty_pages > 0:
+                            # 1. Check file size limit
+                            file_size_mb = getattr(file, "size", 0) / (1024 * 1024)
+                            if file_size_mb > MAX_UPLOAD_MB:
                                 st.warning(
-                                    f"File '{filename}': {empty_pages} page(s) have no text layer "
-                                    "(scanned images are not supported)."
+                                    f"File '{filename}' ({file_size_mb:.1f} MB) exceeds the maximum "
+                                    f"allowed size of {MAX_UPLOAD_MB} MB."
                                 )
+                                continue
 
-                        # 5. Chunk pages
-                        chunks = chunk_pages(pages)
-                        if not chunks:
-                            continue
+                            # 2. Check PDF page limit and scan for empty text layers
+                            num_pdf_pages = None
+                            if filename.lower().endswith(".pdf"):
+                                try:
+                                    if hasattr(file, "seek"):
+                                        file.seek(0)
+                                    reader = PdfReader(file)
+                                    num_pdf_pages = len(reader.pages)
+                                    if hasattr(file, "seek"):
+                                        file.seek(0)
+                                    if num_pdf_pages > MAX_PAGES:
+                                        st.warning(
+                                            f"File '{filename}' exceeds the limit of {MAX_PAGES} pages "
+                                            f"({num_pdf_pages} pages)."
+                                        )
+                                        continue
+                                except Exception as pdf_err:
+                                    logger.exception("Failed reading PDF metadata for %s: %s", filename, pdf_err)
 
-                        # 6. Check session chunk limit
-                        cur_count = get_collection(session_collection).count()
-                        if cur_count + len(chunks) > MAX_CHUNKS_PER_SESSION:
-                            st.warning(
-                                f"Cannot add '{filename}': adding {len(chunks)} chunks would exceed "
-                                f"the session limit of {MAX_CHUNKS_PER_SESSION} chunks (currently {cur_count})."
+                            # 3. Load pages
+                            pages = load_document(file)
+                            unreadable = get_unreadable_pages(filename)
+                            if unreadable:
+                                st.session_state.unreadable_pages[filename] = unreadable
+
+                            if not pages:
+                                st.warning(f"No extractable text found in '{filename}'.")
+                                continue
+
+                            # 4. Warn if pages have no text layer
+                            if num_pdf_pages is not None:
+                                extracted_count = len(pages)
+                                empty_pages = num_pdf_pages - extracted_count
+                                if empty_pages > 0:
+                                    st.warning(
+                                        f"File '{filename}': {empty_pages} page(s) have no text layer "
+                                        "(scanned images are not supported)."
+                                    )
+
+                            # 5. Chunk pages
+                            chunks = chunk_pages(pages)
+                            if not chunks:
+                                continue
+
+                            # 6. Check session chunk limit
+                            cur_count = get_collection(session_collection).count()
+                            if cur_count + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                                st.warning(
+                                    f"Cannot add '{filename}': adding {len(chunks)} chunks would exceed "
+                                    f"the session limit of {MAX_CHUNKS_PER_SESSION} chunks (currently {cur_count})."
+                                )
+                                continue
+
+                            # Delete any old chunks of the same filename in this session first
+                            delete_file(filename, collection_name=session_collection)
+                            add_chunks(chunks, collection_name=session_collection)
+                            total_chunks_added += len(chunks)
+                            processed_files_count += 1
+
+                        if processed_files_count > 0:
+                            clear_answer_cache(collection_name=session_collection)
+                            st.session_state.flash_message = (
+                                f"Processed {processed_files_count} file(s) successfully! "
+                                f"Added {total_chunks_added} chunks to vector store."
                             )
-                            continue
-
-                        # Delete any old chunks of the same filename in this session first
-                        delete_file(filename, collection_name=session_collection)
-                        add_chunks(chunks, collection_name=session_collection)
-                        total_chunks_added += len(chunks)
-                        processed_files_count += 1
-
-                    if processed_files_count > 0:
-                        clear_answer_cache(collection_name=session_collection)
-                        st.session_state.flash_message = (
-                            f"Processed {processed_files_count} file(s) successfully! "
-                            f"Added {total_chunks_added} chunks to vector store."
-                        )
-                        st.rerun()
-                    else:
-                        st.warning("No readable text could be indexed from the selected files.")
-                except Exception as exc:
-                    logger.exception("Failed to process documents: %s", exc)
-                    st.error("Failed to process documents. Please check file formatting and try again.")
+                            st.rerun()
+                        else:
+                            st.warning("No readable text could be indexed from the selected files.")
+                    except Exception as exc:
+                        logger.exception("Failed to process documents: %s", exc)
+                        st.error("Failed to process documents. Please check file formatting and try again.")
 
         # Indexed Documents (Knowledge Base)
         st.markdown('<div class="sidebar-section-header">Indexed Documents</div>', unsafe_allow_html=True)
+        is_at_q_limit = DEMO_MODE and not is_owner and (st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION)
         if indexed_files:
+            # Document selector when multiple files are indexed
+            if len(indexed_files) > 1:
+                st.selectbox(
+                    "Focus search on document",
+                    ["All documents"] + indexed_files,
+                    key="selected_doc_filter",
+                    help="Select a specific document to search, or search all.",
+                )
+
             for fname in indexed_files:
                 col_name, col_del = st.columns([0.82, 0.18], vertical_alignment="center")
                 with col_name:
@@ -1039,17 +1083,35 @@ def render_sidebar(session_collection: str) -> None:
                         try:
                             delete_file(fname, collection_name=session_collection)
                             clear_answer_cache(collection_name=session_collection)
+                            st.session_state.unreadable_pages.pop(fname, None)
                             st.session_state.flash_message = f"Removed {fname}"
                             st.rerun()
                         except Exception as del_err:
                             logger.exception("Error deleting file %s: %s", fname, del_err)
                             st.error(f"Error deleting file: {del_err}")
+
+                # Persistent sidebar note per file (Requirement 5)
+                unreadable = st.session_state.get("unreadable_pages", {}).get(fname)
+                if unreadable is None:
+                    unreadable = get_unreadable_pages(fname)
+                    if unreadable:
+                        st.session_state.unreadable_pages[fname] = unreadable
+                if unreadable:
+                    st.caption(format_unreadable_pages(unreadable))
+
+                # Summarize document button per indexed file (Requirement 3)
+                if st.button("Summarize document", key=f"sum_{fname}", width="stretch", disabled=is_at_q_limit):
+                    if not ensure_session_allowed(is_owner=is_owner):
+                        pass
+                    else:
+                        st.session_state.pending_summary = fname
+                        st.rerun()
         else:
             st.caption("No documents in workspace.")
 
         # Session Controls
         st.markdown('<div class="sidebar-section-header">Session Controls</div>', unsafe_allow_html=True)
-        if st.button("Clear Conversation", use_container_width=True):
+        if st.button("Clear Conversation", width="stretch"):
             st.session_state.messages = []
             st.session_state.question_count = 0
             clear_answer_cache(collection_name=session_collection)
@@ -1060,19 +1122,51 @@ def main() -> None:
     """Main application loop."""
     session_collection = initialize_session_state()
 
+    # 1. Owner bypass authentication (Requirement 3)
+    owner_configured_key = OWNER_KEY or get_secret("OWNER_KEY")
+    is_owner = False
+    if owner_configured_key:
+        with st.sidebar:
+            st.markdown('<div class="sidebar-section-header">Owner Access</div>', unsafe_allow_html=True)
+            owner_input = st.text_input(
+                "Owner key",
+                type="password",
+                key="owner_key_input",
+                help="Enter owner key to bypass demo limits.",
+            )
+            if owner_input:
+                if hmac.compare_digest(owner_input.strip(), owner_configured_key):
+                    is_owner = True
+                    st.session_state.is_owner = True
+                    st.caption("🔑 Owner mode active (limits bypassed)")
+                else:
+                    st.session_state.is_owner = False
+                    st.error("Invalid owner key.")
+            else:
+                st.session_state.is_owner = False
+    else:
+        st.session_state.is_owner = False
+
     # Display flash messages after rerun
     if st.session_state.get("flash_message"):
         flash_text = st.session_state.pop("flash_message")
         st.toast(flash_text, icon="✅")
         st.success(flash_text)
 
-    render_sidebar(session_collection)
+    render_sidebar(session_collection, is_owner=is_owner)
 
     # Check indexed files status
     indexed_files = list_files(collection_name=session_collection)
     has_documents = bool(indexed_files)
     file_count = len(indexed_files)
     q_count = st.session_state.question_count
+
+    if DEMO_MODE and not is_owner:
+        turns_pill = f"{q_count}/{MAX_QUESTIONS_PER_SESSION} questions"
+    elif is_owner:
+        turns_pill = f"{q_count} questions (Owner)"
+    else:
+        turns_pill = f"{q_count} questions"
 
     # Modern Workspace Header with metadata pills
     st.markdown(
@@ -1082,7 +1176,7 @@ def main() -> None:
                 <h1 class="workspace-title">DocChat Workspace</h1>
                 <div class="workspace-meta-pills">
                     <span class="meta-pill">{file_count} {"document" if file_count == 1 else "documents"} indexed</span>
-                    <span class="meta-pill">{q_count}/{MAX_QUESTIONS_PER_SESSION} turns</span>
+                    <span class="meta-pill">{turns_pill}</span>
                 </div>
             </div>
             <p class="workspace-desc">Ask questions grounded in your private documents with verifiable citations.</p>
@@ -1113,12 +1207,85 @@ def main() -> None:
                 render_sources(message["sources"], uncited=message.get("uncited", False))
 
     # Check question limit for session
-    is_at_q_limit = st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION
+    is_at_q_limit = DEMO_MODE and not is_owner and (st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION)
     if is_at_q_limit:
         st.warning(
             f"You have reached the limit of {MAX_QUESTIONS_PER_SESSION} questions for this session. "
             "Please clear conversation or start a new session to continue."
         )
+
+    # Check for pending summary request from sidebar (Requirement 3)
+    if st.session_state.get("pending_summary"):
+        target_file = st.session_state.pop("pending_summary")
+
+        if not ensure_session_allowed(is_owner=is_owner):
+            pass
+        elif DEMO_MODE and not is_owner and st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION:
+            st.warning(f"Session question limit reached ({MAX_QUESTIONS_PER_SESSION} max).")
+        elif DEMO_MODE and not is_owner and not check_and_increment_daily_llm_calls():
+            quota_msg = "The AI model's free daily limit has been reached. Please try again later."
+            st.warning(quota_msg)
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": quota_msg,
+                    "sources": [],
+                    "uncited": False,
+                }
+            )
+        else:
+            summary_query = f"Summarize document: {target_file}"
+            st.session_state.messages.append({"role": "user", "content": summary_query})
+            with st.chat_message("user"):
+                st.markdown(summary_query)
+
+            with st.chat_message("assistant"):
+                with st.spinner(f"Generating summary for {target_file}..."):
+                    try:
+                        summary_res = summarize_document(
+                            file=target_file,
+                            collection_name=session_collection,
+                        )
+                        if summary_res.get("called_llm", True):
+                            st.session_state.question_count += 1
+                        st.markdown(summary_res["answer"])
+                        if summary_res.get("sources"):
+                            render_sources(
+                                summary_res["sources"],
+                                uncited=summary_res.get("uncited", False),
+                            )
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": summary_res["answer"],
+                                "sources": summary_res.get("sources", []),
+                                "uncited": summary_res.get("uncited", False),
+                            }
+                        )
+                    except QuotaExceededError:
+                        quota_warning = "The AI model's free daily limit has been reached. Please try again later."
+                        st.warning(quota_warning)
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": quota_warning,
+                                "sources": [],
+                                "uncited": False,
+                            }
+                        )
+                    except Exception as sum_exc:
+                        logger.exception("Error summarizing %s: %s", target_file, sum_exc)
+                        clean_error = "An error occurred while generating the summary. Please try again in a moment."
+                        st.error(clean_error)
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": clean_error,
+                                "sources": [],
+                                "uncited": False,
+                            }
+                        )
+            st.rerun()
 
     # Chat input
     user_input = st.chat_input(
@@ -1133,42 +1300,67 @@ def main() -> None:
     if user_input:
         user_question = user_input.strip()
 
-        # Enforce question limit
-        if st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION:
-            st.warning(f"Session question limit reached ({MAX_QUESTIONS_PER_SESSION} max).")
-            return
+        if not ensure_session_allowed(is_owner=is_owner):
+            pass
+        else:
+            # 1. Display user query
+            st.session_state.messages.append({"role": "user", "content": user_question})
+            with st.chat_message("user"):
+                st.markdown(user_question)
 
-        # 1. Display user query
-        st.session_state.messages.append({"role": "user", "content": user_question})
-        with st.chat_message("user"):
-            st.markdown(user_question)
+            # 2. Extract recent history using MAX_HISTORY_TURNS
+            recent_history = st.session_state.messages[:-1][-MAX_HISTORY_TURNS:]
 
-        # 2. Enforce daily API limit before calling model
-        if not check_and_increment_daily_llm_calls():
-            quota_msg = "The AI model's free daily limit has been reached. Please try again later."
-            st.warning(quota_msg)
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": quota_msg,
-                    "sources": [],
-                    "uncited": False,
-                }
-            )
-            return
+        # Determine target file for search/filtering
+        selected_file = None
+        if len(indexed_files) == 1:
+            selected_file = indexed_files[0]
+        elif len(indexed_files) > 1:
+            doc_filter = st.session_state.get("selected_doc_filter", "All documents")
+            if doc_filter != "All documents":
+                selected_file = doc_filter
 
         # 3. Generate assistant response
         with st.chat_message("assistant"):
-            # Extract last 4 turns of history before this message
-            recent_history = st.session_state.messages[:-1][-4:]
-
             try:
                 # Stream answer using rag.stream_answer
                 stream = stream_answer(
                     user_question,
                     history=recent_history,
                     collection_name=session_collection,
+                    file=selected_file,
                 )
+
+                will_call_llm = getattr(stream, "called_llm", True)
+
+                # Enforce limits only if the LLM is actually called
+                if will_call_llm and DEMO_MODE and not is_owner:
+                    if st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION:
+                        limit_msg = f"You have reached the limit of {MAX_QUESTIONS_PER_SESSION} questions for this session."
+                        st.warning(limit_msg)
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": limit_msg,
+                                "sources": [],
+                                "uncited": False,
+                            }
+                        )
+                        return
+
+                    if not check_and_increment_daily_llm_calls():
+                        quota_msg = "The AI model's free daily limit has been reached. Please try again later."
+                        st.warning(quota_msg)
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": quota_msg,
+                                "sources": [],
+                                "uncited": False,
+                            }
+                        )
+                        return
+
                 full_answer = st.write_stream(stream)
                 sources = getattr(stream, "sources", [])
                 uncited = getattr(stream, "uncited", False)
@@ -1177,8 +1369,9 @@ def main() -> None:
                 if sources:
                     render_sources(sources, uncited=uncited)
 
-                # Increment session question count on success
-                st.session_state.question_count += 1
+                # Increment session question count only if LLM was called
+                if will_call_llm:
+                    st.session_state.question_count += 1
 
                 # Save assistant message and sources to session state
                 st.session_state.messages.append(

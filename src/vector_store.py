@@ -160,13 +160,32 @@ def add_chunks(
 
     ids = [str(c["chunk_id"]) for c in chunks]
     texts = [str(c.get("text", "")) for c in chunks]
-    metadatas = [
-        {
-            "file": str(c.get("file", "")),
+
+    # Determine total_pages per file fallback
+    file_total_pages: dict[str, int] = {}
+    for c in chunks:
+        fn = str(c.get("file", ""))
+        tp = c.get("total_pages")
+        if tp is not None:
+            file_total_pages[fn] = max(file_total_pages.get(fn, 1), int(tp))
+        else:
+            file_total_pages[fn] = max(file_total_pages.get(fn, 1), int(c.get("page", 1)))
+
+    metadatas: list[dict[str, Any]] = []
+    for c in chunks:
+        fn = str(c.get("file", ""))
+        tp = int(c.get("total_pages", file_total_pages.get(fn, 1)))
+        meta: dict[str, Any] = {
+            "file": fn,
             "page": int(c.get("page", 1)),
+            "total_pages": tp,
         }
-        for c in chunks
-    ]
+        if "unreadable_pages" in c and c["unreadable_pages"]:
+            if isinstance(c["unreadable_pages"], (list, tuple, set)):
+                meta["unreadable_pages"] = ",".join(str(p) for p in c["unreadable_pages"])
+            else:
+                meta["unreadable_pages"] = str(c["unreadable_pages"])
+        metadatas.append(meta)
 
     # Generate embeddings for all chunk texts
     embeddings = embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
@@ -200,6 +219,7 @@ def search(
             - 'text' (str): Chunk text content.
             - 'file' (str): Source filename.
             - 'page' (int): Source page number.
+            - 'total_pages' (int): Total page count of document.
             - 'score' (float): Cosine similarity score (1 - cosine distance).
 
     Raises:
@@ -251,10 +271,47 @@ def search(
             "text": doc,
             "file": meta.get("file", ""),
             "page": meta.get("page", 1),
+            "total_pages": int(meta.get("total_pages", 1)),
             "score": score,
         })
 
     return hits
+
+
+def get_file_chunks(
+    filename: str,
+    collection_name: str = COLLECTION_NAME,
+) -> list[dict[str, Any]]:
+    """Retrieve all stored chunks for a specific file from the collection.
+
+    Args:
+        filename: Name of the file.
+        collection_name: Target collection name. Defaults to COLLECTION_NAME ('docchat').
+
+    Returns:
+        List of chunk dictionaries with 'text', 'file', 'page', and 'total_pages'.
+    """
+    if not filename:
+        return []
+    collection = get_collection(name=collection_name)
+    try:
+        results = collection.get(where={"file": filename}, include=["documents", "metadatas"])
+    except Exception:
+        return []
+
+    docs = results.get("documents") or []
+    metas = results.get("metadatas") or []
+    chunks: list[dict[str, Any]] = []
+
+    for doc, meta in zip(docs, metas):
+        m = meta if isinstance(meta, dict) else {}
+        chunks.append({
+            "text": doc,
+            "file": m.get("file", filename),
+            "page": int(m.get("page", 1)),
+            "total_pages": int(m.get("total_pages", 1)),
+        })
+    return chunks
 
 
 def list_files(collection_name: str = COLLECTION_NAME) -> list[str]:
